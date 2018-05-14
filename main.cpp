@@ -60,7 +60,7 @@ int main()
   if ((ret_code = mm_read_mtx_crd_size(f, &M, &N, &nz)) !=0)
     exit(1);
 
-  //Check if symmetric
+  //Check if symmetric ---Might not need for my purposes but will keep for now
   if ( mm_is_symmetric( matcode ) || mm_is_hermitian( matcode ) )
     {
       isSymmetric = 1;
@@ -72,7 +72,7 @@ int main()
   memset(temp_csrRowPtrA, 0, (rowsA+1) * sizeof(int)); //Make empty/all zero's to start
 
   //Hold all rox indexes, colun indexes, and values corresponding to the [l] they were entered in 
-  //i.e. csrvalA_tmp[l] is the value at row = csrRowIdxA_tmp[l] and col = csrRowIdxA_tmp[l]
+  //i.e. csrvalA_tmp[l] is the value at row = csrRowIndexA_tmp[l] and col = csrRowIndexA_tmp[l]
   //l represents a number between 0-l (which is the # of nnz)
   int *temp_csrRowIndexA = (int *)malloc(nnzA_mtx * sizeof(int));
   int *temp_csrColIndexA = (int *)malloc(nnzA_mtx * sizeof(int));
@@ -107,8 +107,8 @@ int main()
 
       //Add the value/indexes to respective arrays
       temp_csrRowPtrA[i]++;
-      temp_csrRowIdxA[i] = i;
-      temp_csrColIdxA[i] = j;
+      temp_csrRowIndexA[i] = i;
+      temp_csrColIndexA[i] = j;
       if(isReal)
 	{
 	  temp_csrValueA[i] = double_value;
@@ -127,17 +127,17 @@ int main()
     {
       for (int i = 0; i < nnzA_mtx; i++)
         {
-	  if (csrRowIdxA_tmp[i] != csrColIdxA_tmp[i])
-	    csrRowPtrA_counter[csrColIdxA_tmp[i]]++;
+	  if (temp_csrRowIndexA[i] != temp_csrColIndexA[i])
+	    temp_csrRowPtrA[temp_csrColIndexA[i]]++;
         }
     }
 
-  // exclusive scan for csrRowPtrA_counter
+  // exclusive scan for temp_csrRowPtrA
   int old_val, new_val;
   //Turns into a correct rowptr array (index of valueArray where a new row begins)
   //Ex. Would make [4,2,0,6,7] -> [0,4,6,6,12]
-  old_val = csrRowPtrA_counter[0];
-  csrRowPtrA_counter[0] = 0;
+  old_val = temp_csrRowPtrA[0];
+  temp_csrRowPtrA[0] = 0;
   for (int i = 1; i <= rowsA; i++)
     {
       new_val = temp_csrRowPtrA[i];
@@ -145,7 +145,7 @@ int main()
       old_val = new_val;
     }
 
-  nnzA = csrRowPtrA_counter[rowsA]; //num of non-zeros in Matrix A
+  nnzA = temp_csrRowPtrA[rowsA]; //num of non-zeros in Matrix A
   //_mm_malloc is a special version of malloc by intel that aligns memory, the second parameter is the alignment size, and in this case it seems the program is using a special one from its other library
   csrRowPtrA = (int *)malloc((rowsA+1) * sizeof(int)); //Init the csrRowPtr for Matrix A (this was done earlier automatically for out tmp versions in function call)
   memcpy(csrRowPtrA, temp_csrRowPtrA, (rowsA+1) * sizeof(int)); //copy the value from temp to this array
@@ -161,7 +161,7 @@ int main()
 	  //Not on the diagonal (like y = -x) that the symmetry is defined around
 	  if (temp_csrRowIndexA[i] != temp_csrColIndexA[i])
             {
-	      int offset = csrRowPtrA[temp_csrRowIndexA[i]] + temp_csrRowPtrA[csrRowIndexA_tmp[i]];
+	      int offset = csrRowPtrA[temp_csrRowIndexA[i]] + temp_csrRowPtrA[temp_csrRowIndexA[i]];
 	      csrColIndexA[offset] = temp_csrColIndexA[i];
 	      csrValueA[offset] = temp_csrValueA[i];
 	      temp_csrRowPtrA[temp_csrRowIndexA[i]]++;
@@ -173,7 +173,7 @@ int main()
             }
 	  else
             {
-	      int offset = csrRowPtrA[temp_csrRowIndexA[i]] + temp_csrRowPtrA[csrRowIndexA_tmp[i]];
+	      int offset = csrRowPtrA[temp_csrRowIndexA[i]] + temp_csrRowPtrA[temp_csrRowIndexA[i]];
 	      csrColIndexA[offset] = temp_csrColIndexA[i];
 	      csrValueA[offset] = temp_csrValueA[i];
 	      temp_csrRowPtrA[temp_csrRowIndexA[i]]++;
@@ -185,7 +185,7 @@ int main()
       for (int i = 0; i < nnzA_mtx; i++)
         {
 	  //Same block as all above except the symmetry one which is similar but flipped obviously
-	  int offset = csrRowPtrA[temp_csrRowIndexA[i]] + temp_csrRowPtrA[csrRowIndexA_tmp[i]];
+	  int offset = csrRowPtrA[temp_csrRowIndexA[i]] + temp_csrRowPtrA[temp_csrRowIndexA[i]];
 	  csrColIndexA[offset] = temp_csrColIndexA[i];
 	  csrValueA[offset] = temp_csrValueA[i];
 	  temp_csrRowPtrA[temp_csrRowIndexA[i]]++;
