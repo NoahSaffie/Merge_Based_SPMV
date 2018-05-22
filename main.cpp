@@ -17,7 +17,7 @@ struct Coord
   int y;
 };
 
-inline void DetermineCoordinate(int diagonal, int* csrRowPtrA, int sizeA, int startX, Coord &point);
+inline void DetermineCoordinate(int diagonal, int* csrRowPtrA, int sizeA, int sizeB, Coord &point);
 inline void MergePath(int sizeA, int sizeB, int* csrRowPtrA, int* csrColIndex, VALUE_TYPE* csrValueA, vector<double> x, vector<double> &y);
 inline void StandardSpMV(int* csrColIndexA, int* csrRowPtrA, VALUE_TYPE* csrValueA, vector<double> x, vector<double> &y_verified, int sizeA);
 inline void CompareVectors(vector<double> y1, vector<double> y2);
@@ -213,37 +213,25 @@ int main(int argc, char* argv[])
   free(csrRowPtrA);
   return 0;
 }
-inline void DetermineCoordinate(int diagonal, int* csrRowPtrA, int sizeA, int startX, Coord &point)
+inline void DetermineCoordinate(int diagonal, int* csrRowPtrA, int sizeA, int sizeB, Coord &point)
 {
-  /*
-    Changes:
-    Use the already known starting coordinate (the x-value specifically) for this section to find the end coordinate much quicker
-    Use a loop to work directly up to end coordinate instead of using a pivot to bring x_min and x_max closer, until together determine endCoord
-   */
-  //int num_threads = omp_get_num_threads(); //May need for some optimization
-  //maximum iterations is same as Items Per Thread (In reality should always be less)
-  int x = startX;
-  int y = diagonal-x;
-  //schedule will be monotonic - increasing iteration order
-  //might need thread cancellization - Want to be able to "cancel" a single thread and disregard all iterations it was assigned
-  //And when using the cancellization dynamic is gonna be our best choice
-  for(; x<sizeA && (y > csrRowPtrA[x]); ++x, y = diagonal-x);
-  //May want to play around with the conditioning to avoid false positives from concurrency
-  //Such as the break condition being finding the x,y where the y is less than RowPtr[x] but @ the coordinate right before it the y > RowPtr[x]
-  //Use shortcircuting with this to avoid unnecessary overhead when possible
-
-  //Another nice option would be to keep track of a x_max that is determined by and updated by threads that have hit a invalid coordinate we know to be past the correct point
-  //And then reassigning the threads to the now know area
-  //---------------Hoping to avoid this by using monotonic scheduling and hopefully something else to have the concurrent iterations be in very close increasing iteration order----------
-  //so focus on solving that
-  
-  //Output
-  if(x >= sizeA) 
+  int x_min = max(diagonal - sizeB, 0); //First option because a diagonal can go "off"/below the table and in that final case we can find where it first comes on to the table to be the minimum
+  int x_max = min(diagonal, sizeA); //First option for the very early cases where the diagonal ends before the end of RowPtr
+  int x_mid;
+  while(x_min != x_max)
     {
-      x = sizeA-1;
+      x_mid = (x_min+x_max) >> 2;
+      if((diagonal-x_mid) > csrRowPtrA[x_mid])
+	{
+	  x_min = x_mid;
+	}
+      else
+	{
+	  x_max = x_mid;
+	}
     }
-  point.x = x;
-  point.y = y;  
+  point.x = min(x_min, sizeA-1); //Double check it is valid index
+  point.y = diagonal-x_min;
 }
 inline void MergePath(int sizeA, int sizeB, int* csrRowPtrA, int* csrColIndex, VALUE_TYPE* csrValueA, vector<double> x, vector<double> &y)
 {
@@ -252,40 +240,34 @@ inline void MergePath(int sizeA, int sizeB, int* csrRowPtrA, int* csrColIndex, V
     Abandoned ListB entirely, can accomplish its use by simply having a 'y' value when finding coordinates 
     Simplified the section about a row spanning across more than one team, no needed overhead like before
     Calculate IPT slightly different (In a more base logical way [Possible I just miss why the other way is better])
-    Determine all coordinates before traversing the path at a team/thread level, this allows all the start/end coordinates of teams to be found much quicker (stored more condensly too!)
     Simpler basis for determing diagonals - Works entirely based the Items per thread
    */
   /*
     Drawbacks/Considerations:
-    Workload can become unbalanced as Thread # approaches Path Length (which should be a rare issue since using with large data sets)
-        Still should examine if we can improve this niche (either by checking if PathLength is close to # of threads and respond with a different IPT ditermination, or a new basis for IPT for all cases)
     Checking if OpenMP is actually enabled and not operating under the assumption it is
    */
   /*
     Notes:
     startCoord.y  is the value(an index) of listB
     IPT - Items Per Thread
-    CoordList - There are 2 diagonals for every thread/team, only two are used exactly once (first and last one), others are a shared diagonal, so only need 1 diagonal per thread plus 1 extra
-        Must always have a starting coordinate of (0,0) as that would be the first starting diagonal and the diagonal only crosses a single point (0,0)
     Getting totalData - x[csrColIndex[startCoord.y]] is a part of our selective dot product (Ignoring 0 sums)
         We are doing row*column, we get row value from:  Value<row, column> where row is set by outer loop, and column is startCood.y (this is as if in Matrix)
         For the column we want the value in X that corresponds to the column  in the Matrix we are working in so x[csrColIndex[startCoord.y]] does this
    */
+  
   int num_of_threads = omp_get_num_threads();
-  Coord* coordList = (Coord*)malloc(sizeof(Coord)*(num_of_threads+1));
   int totalPathLength = sizeA+sizeB;
-  int IPT = totalPathLength/num_of_threads; //Change by +1 if not easily divisible ?
-  coordList[0] = {0, 0};
-  //Cannot use OpenMP here, but can utilize within funciton itself
-  for(int j = 0; j < num_of_threads; ++j)
-    {
-      DetermineCoordinate(IPT*(j+1), csrRowPtrA, sizeA, coordList[j].x, coordList[j+1]);
-    }
-  #pragma omp parallel for num_threads(num_of_threads) default(none) firstprivate(num_of_threads, coordList, x, csrValueA, csrColIndex, csrRowPtrA) shared(y)
+  int IPT = ((totalPathLength-1)/num_of_threads)+1; //THe -1, will cancel out the +1 if they were easily divisible. The +1 will help fix the unbalanced load that would result on the final team/thread i the result of uneven division when finding IPT  
+#pragma omp parallel for num_threads(num_of_threads) default(none) firstprivate(num_of_threads, x, csrValueA, csrColIndex, csrRowPtrA, sizeA, sizeB, IPT, totalPathLength) shared(y)
   for(int i = 0; i < num_of_threads; i++)
     {
-      Coord startCoord = coordList[i];
-      Coord endCoord = coordList[i+1];
+      Coord startCoord;
+      int startDiagonal = min(startDiagonal, totalPathLength); //totalPathLength check is because it is the final y value for the diagonal to be, that it will intersect perfectly for the very last coordinate
+      //it should never be necessary on the startDiagonal but it is not impossible that it be needed so put just in case
+      DetermineCoordinate(IPT*i, csrRowPtrA, sizeA, sizeB, startCoord);
+      Coord endCoord;
+      int endDiagonal = min(startDiagonal+IPT, totalPathLength); //See above
+      DetermineCoordinate(endDiagonal, csrRowPtrA, sizeA, sizeB, endCoord);
       double totalData;
       //Collect info from areas
       for(; startCoord.x <= endCoord.x; ++startCoord.x, totalData = 0.0)
@@ -299,7 +281,6 @@ inline void MergePath(int sizeA, int sizeB, int* csrRowPtrA, int* csrColIndex, V
 	  y.at(startCoord.x) = y.at(startCoord.x) +  totalData;
 	}	  
     }
-  free(coordList);
 }
 inline void StandardSpMV(int* csrColIndexA, int* csrRowPtrA, VALUE_TYPE* csrValueA, vector<double> x, vector<double> &y_verified, int sizeA)
 {
