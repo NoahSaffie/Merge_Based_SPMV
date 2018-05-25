@@ -1,3 +1,10 @@
+/*
+  Supply the program with a single .mtx file through command line
+  or you can supply it a .txt file that has the following:
+  path to directory with .mtx fiiles as first line
+  every subsequent line is a filename for an mtx.
+  If file names in .txt already include .mtx extension then change REQUIRES_MTX_EXTENSION below to 0
+ */
 #include <iostream>
 #include <cstdlib>
 #include <cstring>
@@ -5,32 +12,63 @@
 #include <omp.h>
 #include <chrono>
 #include <fstream>
-extern "C"
-{
+extern "C"{
 #include "mmio.h"
 }
+
 using namespace std;
 #define VALUE_TYPE double
-
+#define REQUIRES_MTX_EXTENSION 1
 //Credit to: https://stackoverflow.com/questions/22387586/measuring-execution-time-of-a-function-in-c
 typedef std::chrono::high_resolution_clock::time_point TimeVar;
 #define duration(a) std::chrono::duration_cast<std::chrono::nanoseconds>(a).count()
 #define timeNow() std::chrono::high_resolution_clock::now()
-struct Coord
-{
-  int x;
-  int y;
-};
+struct Coord{int x;int y;};
 
 inline void DetermineCoordinate(int diagonal, vector<int>csrRowPtrA, int sizeB, Coord &point);
 inline void MergePath(vector<int> csrRowPtrA, vector<int> csrColIndex, vector<VALUE_TYPE> csrValueA, vector<double> x, vector<double> &y, double &MergeTime, double &DiagonalTime);
-inline void StandardSpMV(vector<int> csrColIndexA, vector<int> csrRowPtrA, vector<VALUE_TYPE> csrValueA, vector<double> x, vector<double> &y_verified);
+inline void StandardSpMV(vector<int> csrRowPtrA, vector<int> csrColIndexA, vector<VALUE_TYPE> csrValueA, vector<double> x, vector<double> &y_verified);
 inline void CompareVectors(vector<double> y1, vector<double> y2);
-inline void GetMatrix(char* filename, vector<int> &csrRowPtrA, vector<int> &csrColIndexA, vector<VALUE_TYPE> &csrValueA);
-inline void RunTests(int argc, char* argv[], int testsToRunOnFile);
+inline void GetMatrix(string filename, vector<int> &csrRowPtrA, vector<int> &csrColIndexA, vector<VALUE_TYPE> &csrValueA);
+inline void RunTests(string filename);
 int main(int argc, char* argv[])
 {
-  RunTests(argc, argv, 1000);
+  /*
+    Looks for a Command Line Arguement that is either a single .mtx file
+    or a .txt that contains a list of .mtx files, with one per line and nothing else
+   */
+  string filename;
+  if(argc < 3)
+    {
+      filename = argv[1];
+      cout << "Recieved a file name of: " << filename << endl;
+    }
+  else
+    {
+      cout << "Failed to recieve or recongize, a command line argument for a file of .mtx" << endl;
+    }
+  if(filename.find(".txt") != -1)
+    {
+      string path;
+      string nextFile;
+      fstream inputFiles;
+      inputFiles.open(filename);
+      inputFiles >> path;
+      while(inputFiles.peek() != EOF)
+	{
+	  inputFiles >> nextFile;
+	  string fileWithPath(path);
+	  fileWithPath.append(nextFile);
+	  if(REQUIRES_MTX_EXTENSION){	  fileWithPath.append(".mtx");}
+	  cout << "Processing file: " << fileWithPath << endl;
+	  RunTests(fileWithPath);
+	}
+    }
+  else if(filename.find(".mtx") != -1)
+    {
+	RunTests(filename);
+    }
+  else{cout << "Failed to receive or recongize a .mtx or .txt" << endl;}
   return 0;
 }
 inline void DetermineCoordinate(int diagonal, vector<int> csrRowPtrA, int sizeB, Coord &point)
@@ -41,7 +79,7 @@ inline void DetermineCoordinate(int diagonal, vector<int> csrRowPtrA, int sizeB,
   int x_mid;
   while(x_min != x_max)
     {
-      x_mid = (x_min+x_max) >> 2;
+      x_mid = (x_min+x_max) >> 1;
       if((diagonal-x_mid) > csrRowPtrA.at(x_mid+1))
 	{
 	  x_min = x_mid;
@@ -80,7 +118,7 @@ inline void MergePath(vector<int> csrRowPtrA, vector<int> csrColIndex, vector<VA
    */
   
   int num_of_threads = omp_get_num_threads();
-  #pragma omp parallel for num_threads(num_of_threads) default(none) firstprivate(num_of_threads, x, csrValueA, csrColIndex, csrRowPtrA) shared(y, MergeTime, DiagonalTime)
+#pragma omp parallel for num_threads(num_of_threads) schedule(static) default(none) firstprivate(num_of_threads, x, csrValueA, csrColIndex, csrRowPtrA) shared(y, MergeTime, DiagonalTime)
   for(int i = 0; i < num_of_threads; i++)
     {
       int sizeA = csrRowPtrA.size()-1;
@@ -101,69 +139,85 @@ inline void MergePath(vector<int> csrRowPtrA, vector<int> csrColIndex, vector<VA
       #pragma omp critical(TimeOutputDiagonal)
       DiagonalTime += duration(diagonalEnd - diagonalStart);
       TimeVar mergeStart = timeNow();
-      double totalData;
+      double totalData = 0.0;
       for(; startCoord.x <= endCoord.x; ++startCoord.x, totalData = 0.0)
 	{
+	  //printf("Start Coord X: %d\n", startCoord.x);
 	  for(; startCoord.y <= endCoord.y && csrRowPtrA.at(startCoord.x+1) > startCoord.y; ++startCoord.y)
 	    {
 	      totalData += (csrValueA.at(startCoord.y) * x.at(csrColIndex.at(startCoord.y)));
 	    }
+	  //printf("Row: %d\nTotal Data: %lf\n", startCoord.x, totalData);
           #pragma omp critical(OutputUpdate)
 	  y.at(startCoord.x) = y.at(startCoord.x) +  totalData;
+	  //printf("Y: %lf\n", y.at(startCoord.x));
 	}
       TimeVar mergeEnd = timeNow();
       #pragma omp critical(TimeOutputMerge)
       MergeTime += duration(mergeEnd-mergeStart);
     }
+  #pragma omp barrier
 }
-inline void RunTests(int argc, char* argv[], int testToRunOnFile)
+inline void RunTests(string filename)
 {
-  ofstream outputFile;
-  outputFile.open("output.txt", ios::out | ios::app);
-  int TESTS_FOR_SINGLE_FILE = testToRunOnFile;
+  //int TESTS_FOR_SINGLE_FILE = testToRunOnFile;
+  //Vector Declarations/Inits
   vector<int> RowPtrA;
   vector<int> ColIndexA;
   vector<VALUE_TYPE> ValueA;
-  char* filename;
-  if(argc < 3)
-    {
-      filename = argv[1];
-    }
-  else
-    {
-      cout << "Failed to recieve or recongize, a command line argument for a file of .mtx" << endl;
-    }
+
+  //File I/O
+  ofstream outputFile;
+  outputFile.open("output.csv", ios::out | ios::app);
+  string separator(","); //comma for CSV
+  //outputFile << "Matrix" << separator << "Non-zeros" << separator << "Time for Diagonal fucntion" << separator << "Time for Merge path Loop" << separator << "Time for total Merge Function" << endl;
+  //Start processing matrix - Base results and CSR only need to be found once.
   GetMatrix(filename, RowPtrA, ColIndexA, ValueA);
   int nnzA = ColIndexA.size();
   int rowsA = RowPtrA.size();
+  int TESTS_FOR_SINGLE_FILE = max(5, 16000000/nnzA);
   vector<double> x(rowsA, 1.0);
   vector<double> y(rowsA, 0.0);
   vector<double> y_verified(rowsA, 0.0);
-  StandardSpMV(ColIndexA, RowPtrA, ValueA, x, y_verified);
+  //Might want to loop this a couple of times for a more accurate average
+  //double baseTotal = 0.0;
+  //TimeVar baseTime = timeNow();
+  StandardSpMV(RowPtrA, ColIndexA, ValueA, x, y_verified);
+  //TimeVar baseEndTime = timeNow();
+  //baseTotal+=duration(baseEndTime-baseTime);
+  double funcTotal = 0;
+  double mergeTotal = 0;
+  double diagonalTotal = 0;
+  //Run the Mergebased Spmv function multiple times to find a more accurate average time value
   for(int i = 0; i < TESTS_FOR_SINGLE_FILE; i++)
     {
+      double singleMergeTime = 0.0;
+      double singleDiagonalTime = 0.0;
       fill(y.begin(), y.end(), 0.0);
-      double MergeTime = 0.0;
-      double DiagonalTime = 0.0;
-      TimeVar totalStart = timeNow();
-      MergePath(RowPtrA, ColIndexA, ValueA, x, y, MergeTime, DiagonalTime);
-      TimeVar totalEnd = timeNow();
-      double totalTime = duration(totalEnd-totalStart);
+      
+      TimeVar singleFuncStart = timeNow();
+      MergePath(RowPtrA, ColIndexA, ValueA, x, y, singleMergeTime, singleDiagonalTime);
+      TimeVar singleFuncEnd = timeNow();
+      
+      double singleFuncTime = duration(singleFuncEnd-singleFuncStart);
       CompareVectors(y, y_verified);
-      //Filename:nnzA:DiagonalTime:MergeTime:TotalTime
-      outputFile << filename << "\t" << nnzA << "\t" << DiagonalTime << "\t" << MergeTime << "\t" << totalTime << endl;
+      funcTotal+=singleFuncTime;
+      mergeTotal+=singleMergeTime;
+      diagonalTotal+=singleDiagonalTime;
     }
+  //Change filename to only include file not path
+  outputFile << filename.substr(filename.find_last_of("/\\")+1) << separator << nnzA << separator << diagonalTotal/TESTS_FOR_SINGLE_FILE << separator << mergeTotal/TESTS_FOR_SINGLE_FILE << separator << funcTotal/TESTS_FOR_SINGLE_FILE << endl;
   outputFile.close();
 }
-inline void GetMatrix(char* filename, vector<int> &csrRowPtrA, vector<int> &csrColIndexA, vector<VALUE_TYPE> &csrValueA)
+inline void GetMatrix(string filename, vector<int> &csrRowPtrA, vector<int> &csrColIndexA, vector<VALUE_TYPE> &csrValueA)
 {  
   int columnsA, nnzA_mtx, nnzA, rowsA;
   //Based on example by MM
   int ret_code;
   MM_typecode matcode;
   FILE *f;
-  f = fopen(filename, "r");
-  int isInteger = 0, isReal = 0, isSymmetric = 0;
+  f = fopen(filename.c_str(), "r");
+  int isInteger = 0, isReal = 0, isSymmetric = 0, isBinary = 0;
   if (f == NULL)
     exit(1);
 
@@ -171,6 +225,12 @@ inline void GetMatrix(char* filename, vector<int> &csrRowPtrA, vector<int> &csrC
     {
       cout << "Could not process Matrix Market banner." << endl;
       exit(1);
+    }
+  cout << "Matcode: " << matcode << endl;
+  cout << mm_typecode_to_str(matcode) << endl;
+  if( mm_is_pattern( matcode) )
+    {
+      isBinary = 1;
     }
   if ( mm_is_complex( matcode ) )
     {
@@ -188,20 +248,16 @@ inline void GetMatrix(char* filename, vector<int> &csrRowPtrA, vector<int> &csrC
     {
       isSymmetric = 1;
     }
-
-  //Stores how many nnzs are in a given row ([row])
+  
   vector<int> temp_csrRowPtrA(rowsA+1, 0);
-  //Hold all row indexes, colun indexes, and values corresponding to the [l] they were entered in 
-  //i.e. temp_csrValueA[l] is the value at row = temp_csrRowIndexA[l] and col = temp_csrRowIndexA[l]
-  //l represents a number between 0-l (which is the # of nnz)
   vector<int> temp_csrRowIndexA(nnzA_mtx); 
   vector<int> temp_csrColIndexA(nnzA_mtx);
   vector<VALUE_TYPE> temp_csrValueA(nnzA_mtx);
 
-  #pragma omp parallel for default(none) firstprivate(f, nnzA_mtx, isInteger, isReal) shared(temp_csrRowPtrA, temp_csrRowIndexA, temp_csrColIndexA, temp_csrValueA)
+#pragma omp parallel for default(none) firstprivate(f, nnzA_mtx, isInteger, isReal, isBinary) shared(temp_csrRowPtrA, temp_csrRowIndexA, temp_csrColIndexA, temp_csrValueA)
   for (int k = 0; k < nnzA_mtx; k++)
     {
-      int i, j;
+      int i =-1, j = -1;
       VALUE_TYPE double_value;
       int int_value;
       //Can only scan in safely one at a time, otherwise might break future scans
@@ -215,6 +271,10 @@ inline void GetMatrix(char* filename, vector<int> &csrRowPtrA, vector<int> &csrC
         {
 	  fscanf(f, "%d %d %d\n", &i, &j, &int_value);
         }
+      else if(isBinary)
+	{
+	  fscanf(f, "%d %d\n", &i, &j);
+	}
       }
       // adjust from 1-based to 0-based
       i--;
@@ -228,9 +288,13 @@ inline void GetMatrix(char* filename, vector<int> &csrRowPtrA, vector<int> &csrC
 	{
 	  temp_csrValueA.at(k) = double_value;
 	}
-      else
+      else if(isInteger)
 	{
-	  temp_csrValueA.at(k) = int_value;
+	  temp_csrValueA.at(k) = int_value*1.0;
+	}
+      else if(isBinary)
+	{
+	  temp_csrValueA.at(k) = 1.0;
 	}
     }
   fclose(f);
@@ -272,7 +336,6 @@ inline void GetMatrix(char* filename, vector<int> &csrRowPtrA, vector<int> &csrC
     {
       int tempRowIndexAti = temp_csrRowIndexA.at(i);
       int offset = csrRowPtrA.at(tempRowIndexAti) + temp_csrRowPtrA.at(tempRowIndexAti)++;
-
       csrColIndexA.at(offset) = temp_csrColIndexA.at(i);
       csrValueA.at(offset) = temp_csrValueA.at(i);
       //Not on the diagonal (like y = -x) that the symmetry is defined around
@@ -284,10 +347,10 @@ inline void GetMatrix(char* filename, vector<int> &csrRowPtrA, vector<int> &csrC
 	}
     }
 }
-inline void StandardSpMV(vector<int> csrColIndexA, vector<int> csrRowPtrA, vector<VALUE_TYPE> csrValueA, vector<double> x, vector<double> &y_verified)
+inline void StandardSpMV(vector<int> csrRowPtrA, vector<int> csrColIndexA, vector<VALUE_TYPE> csrValueA, vector<double> x, vector<double> &y_verified)
 {
   int sizeA = csrRowPtrA.size();
-  double totalData;
+  double totalData = 0.0;
   for(int i = 0; i < sizeA-1; i++, totalData = 0.0)
     {
       for(int j = csrRowPtrA.at(i); j <  csrRowPtrA.at(i+1); j++)
@@ -296,16 +359,25 @@ inline void StandardSpMV(vector<int> csrColIndexA, vector<int> csrRowPtrA, vecto
 	}
       y_verified.at(i) = totalData;
     }
-
 }
 inline void CompareVectors(vector<double> y1, vector<double> y2)
 {
   if(y1 == y2)
     {
-      cout << "Success!" << endl;
+      //cout << "Success!" << endl;
     }
   else
     {
-      cout << "Failure." << endl;
+      cout << "Failure." <<  endl;
+      /*
+      for(int  i = 0; i < y1.size(); i++)
+	{
+	  cout << "At line: " << i << " of size " << y1.size() << endl;
+	  if(y1.at(i) != y2.at(i))
+	    {
+	      cout << "\ty1: " << y1.at(i) << "\ty2: " << y2.at(i) << endl;
+	    }
+	}
+      */
     }
 }
