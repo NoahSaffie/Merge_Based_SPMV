@@ -21,7 +21,7 @@ using namespace std;
 #define REQUIRES_MTX_EXTENSION 1
 //Credit to: https://stackoverflow.com/questions/22387586/measuring-execution-time-of-a-function-in-c
 typedef std::chrono::high_resolution_clock::time_point TimeVar;
-#define duration(a) std::chrono::duration_cast<std::chrono::nanoseconds>(a).count()
+#define duration(a) std::chrono::duration_cast<std::chrono::microseconds>(a).count()
 #define timeNow() std::chrono::high_resolution_clock::now()
 struct Coord{int x;int y;};
 
@@ -29,7 +29,7 @@ inline void DetermineCoordinate(int diagonal, vector<int>csrRowPtrA, int sizeB, 
 inline void MergePath(vector<int> csrRowPtrA, vector<int> csrColIndex, vector<VALUE_TYPE> csrValueA, vector<double> x, vector<double> &y, double &MergeTime, double &DiagonalTime);
 inline void StandardSpMV(vector<int> csrRowPtrA, vector<int> csrColIndexA, vector<VALUE_TYPE> csrValueA, vector<double> x, vector<double> &y_verified);
 inline void CompareVectors(vector<double> y1, vector<double> y2);
-inline void GetMatrix(string filename, vector<int> &csrRowPtrA, vector<int> &csrColIndexA, vector<VALUE_TYPE> &csrValueA);
+inline int  GetMatrix(string filename, vector<int> &csrRowPtrA, vector<int> &csrColIndexA, vector<VALUE_TYPE> &csrValueA);
 inline void RunTests(string filename);
 int main(int argc, char* argv[])
 {
@@ -37,6 +37,11 @@ int main(int argc, char* argv[])
     Looks for a Command Line Arguement that is either a single .mtx file
     or a .txt that contains a list of .mtx files, with one per line and nothing else
    */
+  
+  ofstream outputFile;
+  outputFile.open("output.csv", ios::out);
+  outputFile << "Matrix,Non-Zeros,Average time to find Coordinate along diagonal,Avergae Path Traversal and Matrix Multipication,Average total time for MergePath Function" << endl; //Header
+  outputFile.close();
   string filename;
   if(argc < 3)
     {
@@ -47,7 +52,7 @@ int main(int argc, char* argv[])
     {
       cout << "Failed to recieve or recongize, a command line argument for a file of .mtx" << endl;
     }
-  if(filename.find(".txt") != -1)
+  if(filename.find(".txt") != string::npos)
     {
       string path;
       string nextFile;
@@ -64,7 +69,7 @@ int main(int argc, char* argv[])
 	  RunTests(fileWithPath);
 	}
     }
-  else if(filename.find(".mtx") != -1)
+  else if(filename.find(".mtx") != string::npos)
     {
 	RunTests(filename);
     }
@@ -139,18 +144,19 @@ inline void MergePath(vector<int> csrRowPtrA, vector<int> csrColIndex, vector<VA
       #pragma omp critical(TimeOutputDiagonal)
       DiagonalTime += duration(diagonalEnd - diagonalStart);
       TimeVar mergeStart = timeNow();
+      int loopY;
       double totalData = 0.0;
       for(; startCoord.x <= endCoord.x; ++startCoord.x, totalData = 0.0)
-	{
-	  //printf("Start Coord X: %d\n", startCoord.x);
-	  for(; startCoord.y <= endCoord.y && csrRowPtrA.at(startCoord.x+1) > startCoord.y; ++startCoord.y)
+	{   
+	  int maxYforLoop = min(csrRowPtrA.at(startCoord.x+1)-1, endCoord.y);
+	  #pragma omp simd
+	  for(loopY = startCoord.y; loopY <= maxYforLoop; ++loopY)
 	    {
-	      totalData += (csrValueA.at(startCoord.y) * x.at(csrColIndex.at(startCoord.y)));
+	      totalData += (csrValueA.at(loopY) * x.at(csrColIndex.at(loopY)));
 	    }
-	  //printf("Row: %d\nTotal Data: %lf\n", startCoord.x, totalData);
+	  startCoord.y = loopY;
           #pragma omp critical(OutputUpdate)
 	  y.at(startCoord.x) = y.at(startCoord.x) +  totalData;
-	  //printf("Y: %lf\n", y.at(startCoord.x));
 	}
       TimeVar mergeEnd = timeNow();
       #pragma omp critical(TimeOutputMerge)
@@ -172,11 +178,16 @@ inline void RunTests(string filename)
   string separator(","); //comma for CSV
   //outputFile << "Matrix" << separator << "Non-zeros" << separator << "Time for Diagonal fucntion" << separator << "Time for Merge path Loop" << separator << "Time for total Merge Function" << endl;
   //Start processing matrix - Base results and CSR only need to be found once.
-  GetMatrix(filename, RowPtrA, ColIndexA, ValueA);
+  int columns = GetMatrix(filename, RowPtrA, ColIndexA, ValueA);
+  if(columns < 0)
+    {
+      outputFile.close();
+      return;
+    }
   int nnzA = ColIndexA.size();
   int rowsA = RowPtrA.size();
   int TESTS_FOR_SINGLE_FILE = max(5, 16000000/nnzA);
-  vector<double> x(rowsA, 1.0);
+  vector<double> x(columns, 1.0);
   vector<double> y(rowsA, 0.0);
   vector<double> y_verified(rowsA, 0.0);
   //Might want to loop this a couple of times for a more accurate average
@@ -209,7 +220,7 @@ inline void RunTests(string filename)
   outputFile << filename.substr(filename.find_last_of("/\\")+1) << separator << nnzA << separator << diagonalTotal/TESTS_FOR_SINGLE_FILE << separator << mergeTotal/TESTS_FOR_SINGLE_FILE << separator << funcTotal/TESTS_FOR_SINGLE_FILE << endl;
   outputFile.close();
 }
-inline void GetMatrix(string filename, vector<int> &csrRowPtrA, vector<int> &csrColIndexA, vector<VALUE_TYPE> &csrValueA)
+inline int GetMatrix(string filename, vector<int> &csrRowPtrA, vector<int> &csrColIndexA, vector<VALUE_TYPE> &csrValueA)
 {  
   int columnsA, nnzA_mtx, nnzA, rowsA;
   //Based on example by MM
@@ -219,15 +230,15 @@ inline void GetMatrix(string filename, vector<int> &csrRowPtrA, vector<int> &csr
   f = fopen(filename.c_str(), "r");
   int isInteger = 0, isReal = 0, isSymmetric = 0, isBinary = 0;
   if (f == NULL)
-    exit(1);
+    return -1;
 
   if ( mm_read_banner(f, &matcode) != 0)
     {
       cout << "Could not process Matrix Market banner." << endl;
-      exit(1);
+      return -2;
     }
-  cout << "Matcode: " << matcode << endl;
-  cout << mm_typecode_to_str(matcode) << endl;
+  //cout << "Matcode: " << matcode << endl;
+  //cout << mm_typecode_to_str(matcode) << endl;
   if( mm_is_pattern( matcode) )
     {
       isBinary = 1;
@@ -235,14 +246,14 @@ inline void GetMatrix(string filename, vector<int> &csrRowPtrA, vector<int> &csr
   if ( mm_is_complex( matcode ) )
     {
       cout <<"Sorry, data type 'COMPLEX' is not supported. " << endl;
-      exit(1);
+      return -3;
     }
   if ( mm_is_real ( matcode) )     { isReal = 1; }
   if ( mm_is_integer ( matcode ) ) { isInteger = 1; }
   /* find out size of sparse matrix .... */
   if ((ret_code = mm_read_mtx_crd_size(f, &rowsA, &columnsA, &nnzA_mtx)) !=0)
     {
-      exit(1);
+      return -4;
     }
   if ( mm_is_symmetric( matcode ) || mm_is_hermitian( matcode ) )
     {
@@ -346,6 +357,7 @@ inline void GetMatrix(string filename, vector<int> &csrRowPtrA, vector<int> &csr
 	  csrValueA.at(offset) = temp_csrValueA.at(i);
 	}
     }
+  return columnsA;
 }
 inline void StandardSpMV(vector<int> csrRowPtrA, vector<int> csrColIndexA, vector<VALUE_TYPE> csrValueA, vector<double> x, vector<double> &y_verified)
 {
@@ -355,7 +367,7 @@ inline void StandardSpMV(vector<int> csrRowPtrA, vector<int> csrColIndexA, vecto
     {
       for(int j = csrRowPtrA.at(i); j <  csrRowPtrA.at(i+1); j++)
 	{
-	  totalData += csrValueA.at(j) * x.at(csrColIndexA.at(i));
+	  totalData += (csrValueA.at(j) * x.at(csrColIndexA.at(j)));
 	}
       y_verified.at(i) = totalData;
     }
@@ -369,8 +381,7 @@ inline void CompareVectors(vector<double> y1, vector<double> y2)
   else
     {
       cout << "Failure." <<  endl;
-      /*
-      for(int  i = 0; i < y1.size(); i++)
+      for(unsigned i = 0; i < y1.size(); i++)
 	{
 	  cout << "At line: " << i << " of size " << y1.size() << endl;
 	  if(y1.at(i) != y2.at(i))
@@ -378,6 +389,5 @@ inline void CompareVectors(vector<double> y1, vector<double> y2)
 	      cout << "\ty1: " << y1.at(i) << "\ty2: " << y2.at(i) << endl;
 	    }
 	}
-      */
     }
 }
