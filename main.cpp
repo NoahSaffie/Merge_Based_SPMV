@@ -13,11 +13,58 @@
 #include <omp.h>
 #include <chrono>
 #include <fstream>
+#include <malloc.h>
 extern "C"{
 #include "mmio.h"
 }
 
 using namespace std;
+
+//Credit to: https://stackoverflow.com/questions/8456236/how-is-a-vectors-data-aligned
+//Also matches this template/default https://www.codeproject.com/Articles/4795/C-Standard-Allocator-An-Introduction-and-Implement
+//http://man7.org/linux/man-pages/man3/posix_memalign.3.html
+//https://msdn.microsoft.com/en-us/library/8z34s9c6.aspx
+template <typename T, std::size_t N = 16>
+class AlignmentAllocator {
+public:
+  typedef T value_type;
+  typedef std::size_t size_type;
+  typedef std::ptrdiff_t difference_type;
+  typedef T * pointer;
+  typedef const T * const_pointer;
+  typedef T & reference;
+  typedef const T & const_reference;
+
+  public:
+  inline AlignmentAllocator () throw () { }
+
+  template <typename T2>
+  inline AlignmentAllocator (const AlignmentAllocator<T2, N> &) throw () { }
+  inline ~AlignmentAllocator () throw () { }
+  inline pointer address (reference r) { return &r; }
+  inline const_pointer address (const_reference r) const { return &r; }
+  inline pointer allocate (size_type n) { return (pointer)aligned_alloc(N, n*sizeof(value_type)); }
+  inline void deallocate (pointer p, size_type) { free(p); }
+  inline void construct (pointer p, const value_type & wert) { new (p) value_type (wert); }
+  inline void destroy (pointer p) { p->~value_type (); }
+  inline size_type max_size () const throw () { return size_type (-1) / sizeof (value_type); }
+  template <typename T2>
+  struct rebind {
+    typedef AlignmentAllocator<T2, N> other; 
+  };
+
+  bool operator!=(const AlignmentAllocator<T,N>& other) const  {
+    return !(*this == other);
+  }
+
+  // Returns true if and only if storage allocated from *this
+  // can be deallocated from other, and vice versa.
+  // Always returns true for stateless allocators.
+  bool operator==(const AlignmentAllocator<T,N>& other) const {
+    return true;
+  }
+};
+#define ALIGNMENT 32
 #define REQUIRES_MTX_EXTENSION 1
 //Credit to: https://stackoverflow.com/questions/22387586/measuring-execution-time-of-a-function-in-c
 typedef std::chrono::high_resolution_clock::time_point TimeVar;
@@ -26,14 +73,14 @@ typedef std::chrono::high_resolution_clock::time_point TimeVar;
 struct Coord{int x;int y;};
 
 inline void DetermineCoordinate(int diagonal, vector<int>csrRowPtrA, int sizeB, Coord &point);
-inline void MergePath(vector<int> csrRowPtrA, vector<int> csrColIndex, vector<double> csrValueA, vector<double> x, vector<double> &y, double &MergeTime, double &DiagonalTime);
-inline void StandardSpMV(vector<int> csrRowPtrA, vector<int> csrColIndexA, vector<double> csrValueA, vector<double> x, vector<double> &y_verified);
-inline int  GetMatrix(string filename, vector<int> &csrRowPtrA, vector<int> &csrColIndexA, vector<double> &csrValueA);
+inline void MergePath(vector<int> csrRowPtrA, vector<int> csrColIndex, vector<double, AlignmentAllocator<double, ALIGNMENT>> csrValueA, vector<double, AlignmentAllocator<double, ALIGNMENT>> x, vector<double> &y, double &MergeTime, double &DiagonalTime);
+inline void StandardSpMV(vector<int> csrRowPtrA, vector<int> csrColIndexA, vector<double, AlignmentAllocator<double, ALIGNMENT>> csrValueA, vector<double, AlignmentAllocator<double, ALIGNMENT>> x, vector<double> &y_verified);
+inline int  GetMatrix(string filename, vector<int> &csrRowPtrA, vector<int> &csrColIndexA, vector<double, AlignmentAllocator<double, ALIGNMENT>> &csrValueA);
 
 
-inline void MergePath(vector<int> csrRowPtrA, vector<int> csrColIndex, vector<int> csrValueA, vector<double> x, vector<double> &y, double &MergeTime, double &DiagonalTime);
-inline void StandardSpMV(vector<int> csrRowPtrA, vector<int> csrColIndexA, vector<int> csrValueA, vector<double> x, vector<double> &y_verified);
-inline int  GetMatrix(string filename, vector<int> &csrRowPtrA, vector<int> &csrColIndexA, vector<int> &csrValueA);
+inline void MergePath(vector<int> csrRowPtrA, vector<int> csrColIndex, vector<int, AlignmentAllocator<int, ALIGNMENT>> csrValueA, vector<double, AlignmentAllocator<double, ALIGNMENT>> x, vector<double> &y, double &MergeTime, double &DiagonalTime);
+inline void StandardSpMV(vector<int> csrRowPtrA, vector<int> csrColIndexA, vector<int, AlignmentAllocator<int, ALIGNMENT>> csrValueA, vector<double, AlignmentAllocator<double, ALIGNMENT>> x, vector<double> &y_verified);
+inline int  GetMatrix(string filename, vector<int> &csrRowPtrA, vector<int> &csrColIndexA, vector<int, AlignmentAllocator<int, ALIGNMENT>> &csrValueA);
 
 inline void CompareVectors(vector<double> y1, vector<double> y2);
 inline void RunTests(string filename);
@@ -46,7 +93,7 @@ int main(int argc, char* argv[])
   
   ofstream outputFile;
   outputFile.open("output.csv", ios::out);
-  outputFile << "Matrix,Non-Zeros,Average time to find Coordinate along diagonal,Avergae Path Traversal and Matrix Multipication,Average total time for MergePath Function" << endl; //Header
+  outputFile << "Matrix,Non-Zeros,Average time to find Coordinate along diagonal,Average Path Traversal and Matrix Multipication,Average total time for MergePath Function" << endl; //Header
   outputFile.close();
   string filename;
   if(argc < 3)
@@ -103,7 +150,7 @@ inline void DetermineCoordinate(int diagonal, vector<int> csrRowPtrA, int sizeB,
   point.x = min(x_min, sizeA-1); //Double check it is valid index
   point.y = diagonal-x_min;
 }
-inline void MergePath(vector<int> csrRowPtrA, vector<int> csrColIndex, vector<double> csrValueA, vector<double> x, vector<double> &y, double &MergeTime, double &DiagonalTime)
+inline void MergePath(vector<int> csrRowPtrA, vector<int> csrColIndex, vector<double, AlignmentAllocator<double, ALIGNMENT>> csrValueA, vector<double, AlignmentAllocator<double, ALIGNMENT>> x, vector<double> &y, double &MergeTime, double &DiagonalTime)
 {
   /*
     Changes: 
@@ -176,7 +223,7 @@ inline void MergePath(vector<int> csrRowPtrA, vector<int> csrColIndex, vector<do
     }
   #pragma omp barrier
 }
-inline void MergePath(vector<int> csrRowPtrA, vector<int> csrColIndex, vector<int> csrValueA, vector<double> x, vector<double> &y, double &MergeTime, double &DiagonalTime)
+inline void MergePath(vector<int> csrRowPtrA, vector<int> csrColIndex, vector<int, AlignmentAllocator<int, ALIGNMENT>> csrValueA, vector<double, AlignmentAllocator<double, ALIGNMENT>> x, vector<double> &y, double &MergeTime, double &DiagonalTime)
 {
  
   int num_of_threads = omp_get_num_threads(); 
@@ -214,12 +261,11 @@ inline void MergePath(vector<int> csrRowPtrA, vector<int> csrColIndex, vector<in
 	   */
 	  #pragma omp simd
 	  for(loopY = startCoord.y; loopY <= maxYforLoop; ++loopY)
-	    {
-	      /*
+	    {/*
 	      if(maxYforLoop-loopY >= 4)
 		{
 		  //Will likely need to play around with how we get to a pointer here
-		  __m256i values =  _mm256_load_pi(csrValueA.at(loopY));
+		  __m256 values =  _mm256_load_ps(csrValueA.at(loopY));
 		  //But now we would need to load in each respective x but these are NOT aligned in memory (or likely not at least)
 		  //So will likely need a new separate section for that
 		  //We can look in the csrColIndexes but we would only wanna load in 4 total but could fit in 8 (since ints) so use __m128 instead?
@@ -228,8 +274,20 @@ inline void MergePath(vector<int> csrRowPtrA, vector<int> csrColIndex, vector<in
 
 
 		  loopY+=3; //Other ++ is still in loop header
-		}
-	      */
+		  }
+	     */
+	      /* 
+		 Useful AVX/AVX2 commands:
+		 __m256d __mm256_mul_pd(__256d a, __256d b) --- Multiply Packed doubles
+		 __m256 __mm256_mul_ps(__256 a, __256 b) -- Multiply Packed singles
+		 __mm256_load_ps(pd)(mem) -- aligned load
+		 __mm256_loadu_ps(pd)(mem) --Unaligned load
+		 
+		 For adding results:
+		 Manually
+		 ...
+	       */
+	      
 	      totalData += (csrValueA.at(loopY) * x.at(csrColIndex.at(loopY)));
 	    }
 	  startCoord.y = loopY;
@@ -274,7 +332,7 @@ inline void RunTests(string filename)
   double diagonalTotal = 0;
   if(isReal)
     {
-      vector<double> ValueA;
+      vector<double, AlignmentAllocator<double, ALIGNMENT>> ValueA;
         //Start processing matrix - Base results and CSR only need to be found once.
       columns = GetMatrix(filename, RowPtrA, ColIndexA, ValueA);
       if(columns < 0) //Returned a negative which is an error
@@ -284,7 +342,7 @@ inline void RunTests(string filename)
 	}
       nnzA = ColIndexA.size();
       rowsA = RowPtrA.size();
-      vector<double> x(columns, 1.0);
+      vector<double, AlignmentAllocator<double, ALIGNMENT>> x(columns, 1.0);
       vector<double> y(rowsA, 0.0);
       vector<double> y_verified(rowsA, 0.0);
       TESTS_FOR_SINGLE_FILE = max(5, 16000000/nnzA);
@@ -309,7 +367,7 @@ inline void RunTests(string filename)
     }
   else if(isInteger || isBinary)
     {
-      vector<int> ValueA;
+      vector<int, AlignmentAllocator<int, ALIGNMENT>> ValueA;
       //Start processing matrix - Base results and CSR only need to be found once.
       columns = GetMatrix(filename, RowPtrA, ColIndexA, ValueA);
       if(columns < 0)
@@ -319,7 +377,7 @@ inline void RunTests(string filename)
 	}
       nnzA = ColIndexA.size();
       rowsA = RowPtrA.size();
-      vector<double> x(columns, 1.0);
+      vector<double, AlignmentAllocator<double, ALIGNMENT>> x(columns, 1.0);
       vector<double> y(rowsA, 0.0);
       vector<double> y_verified(rowsA, 0.0);
       TESTS_FOR_SINGLE_FILE = max(5, 16000000/nnzA);
@@ -346,7 +404,7 @@ inline void RunTests(string filename)
   outputFile << filename.substr(filename.find_last_of("/\\")+1) << separator << nnzA << separator << diagonalTotal/TESTS_FOR_SINGLE_FILE << separator << mergeTotal/TESTS_FOR_SINGLE_FILE << separator << funcTotal/TESTS_FOR_SINGLE_FILE << endl;
   outputFile.close();
 }
-inline int GetMatrix(string filename, vector<int> &csrRowPtrA, vector<int> &csrColIndexA, vector<double> &csrValueA)
+inline int GetMatrix(string filename, vector<int> &csrRowPtrA, vector<int> &csrColIndexA, vector<double, AlignmentAllocator<double, ALIGNMENT>> &csrValueA)
 {  
   int columnsA, nnzA_mtx, nnzA, rowsA;
   //Based on example by MM
@@ -432,7 +490,7 @@ inline int GetMatrix(string filename, vector<int> &csrRowPtrA, vector<int> &csrC
   //however it doesn't completely order it, columnIndexes/Value Indexes will not be in exact order
   //But it shouldn't matter everything is in correct row sections and the column index, and value index are still a valid pair
   csrColIndexA = vector<int>(nnzA);
-  csrValueA = vector<double>(nnzA);
+  csrValueA = vector<double, AlignmentAllocator<double, ALIGNMENT>>(nnzA);
   #pragma omp parallel for default(none) shared(csrColIndexA, csrValueA, temp_csrRowPtrA) firstprivate(temp_csrRowIndexA, temp_csrColIndexA, temp_csrValueA, isSymmetric, csrRowPtrA, nnzA_mtx)
   for (int i = 0; i < nnzA_mtx; i++)
     {
@@ -450,7 +508,7 @@ inline int GetMatrix(string filename, vector<int> &csrRowPtrA, vector<int> &csrC
     }
   return columnsA;
 }
-inline int GetMatrix(string filename, vector<int> &csrRowPtrA, vector<int> &csrColIndexA, vector<int> &csrValueA)
+inline int GetMatrix(string filename, vector<int> &csrRowPtrA, vector<int> &csrColIndexA, vector<int, AlignmentAllocator<int, ALIGNMENT>> &csrValueA)
 {  
   int columnsA, nnzA_mtx, nnzA, rowsA;
   //Based on example by MM
@@ -550,7 +608,7 @@ inline int GetMatrix(string filename, vector<int> &csrRowPtrA, vector<int> &csrC
   //however it doesn't completely order it, columnIndexes/Value Indexes will not be in exact order
   //But it shouldn't matter everything is in correct row sections and the column index, and value index are still a valid pair
   csrColIndexA = vector<int>(nnzA);
-  csrValueA = vector<int>(nnzA);
+  csrValueA = vector<int, AlignmentAllocator<int, ALIGNMENT>>(nnzA);
   #pragma omp parallel for default(none) shared(csrColIndexA, csrValueA, temp_csrRowPtrA) firstprivate(temp_csrRowIndexA, temp_csrColIndexA, temp_csrValueA, isSymmetric, csrRowPtrA, nnzA_mtx)
   for (int i = 0; i < nnzA_mtx; i++)
     {
@@ -569,7 +627,7 @@ inline int GetMatrix(string filename, vector<int> &csrRowPtrA, vector<int> &csrC
   return columnsA;
 }
 
-inline void StandardSpMV(vector<int> csrRowPtrA, vector<int> csrColIndexA, vector<double> csrValueA, vector<double> x, vector<double> &y_verified)
+inline void StandardSpMV(vector<int> csrRowPtrA, vector<int> csrColIndexA, vector<double, AlignmentAllocator<double, ALIGNMENT>> csrValueA, vector<double, AlignmentAllocator<double, ALIGNMENT>> x, vector<double> &y_verified)
 {
   int sizeA = csrRowPtrA.size();
   double totalData = 0.0;
@@ -582,7 +640,7 @@ inline void StandardSpMV(vector<int> csrRowPtrA, vector<int> csrColIndexA, vecto
       y_verified.at(i) = totalData;
     }
 }
-inline void StandardSpMV(vector<int> csrRowPtrA, vector<int> csrColIndexA, vector<int> csrValueA, vector<double> x, vector<double> &y_verified)
+inline void StandardSpMV(vector<int> csrRowPtrA, vector<int> csrColIndexA, vector<int, AlignmentAllocator<int, ALIGNMENT>> csrValueA, vector<double, AlignmentAllocator<double, ALIGNMENT>> x, vector<double> &y_verified)
 {
   int sizeA = csrRowPtrA.size();
   double totalData = 0.0;
