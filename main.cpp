@@ -24,7 +24,7 @@ using namespace std;
 //Also matches this template/default https://www.codeproject.com/Articles/4795/C-Standard-Allocator-An-Introduction-and-Implement
 //http://man7.org/linux/man-pages/man3/posix_memalign.3.html
 //https://msdn.microsoft.com/en-us/library/8z34s9c6.aspx
-template <typename T, std::size_t N = 16>
+template <typename T, std::size_t N = 32>
 class AlignmentAllocator {
 public:
   typedef T value_type;
@@ -65,12 +65,9 @@ public:
   }
 };
 #define showFailure 1
-#define ALIGNMENT 32
 #define REQUIRES_MTX_EXTENSION 1
 
 //Allows easy switch of using alignment or now
-#define ALIGN_DOUBLE
-//#define ALIGN_DOUBLE , AlignmentAllocator<double, ALIGNMENT>
 //Credit to: https://stackoverflow.com/questions/22387586/measuring-execution-time-of-a-function-in-c
 typedef std::chrono::high_resolution_clock::time_point TimeVar;
 #define duration(a) std::chrono::duration_cast<std::chrono::microseconds>(a).count()
@@ -79,9 +76,9 @@ struct Coord{int x;int y;};
 
 
 inline void DetermineCoordinate(int diagonal, vector<int>csrRowPtrA, int sizeB, Coord &point);
-inline void MergePath(vector<int> csrRowPtrA, vector<int> csrColIndex, vector<double ALIGN_DOUBLE> csrValueA, vector<double ALIGN_DOUBLE> x, vector<double> &y, double* totalTime);
-inline void StandardSpMV(vector<int> csrRowPtrA, vector<int> csrColIndexA, vector<double ALIGN_DOUBLE> csrValueA, vector<double ALIGN_DOUBLE> x, vector<double> &y_verified);
-inline int  GetMatrix(string filename, vector<int> &csrRowPtrA, vector<int> &csrColIndexA, vector<double ALIGN_DOUBLE> &csrValueA);
+inline void MergePath(vector<int> csrRowPtrA, vector<int> csrColIndex, vector<double> csrValueA, vector<double> x, vector<double> &y, double* totalTime);
+inline void StandardSpMV(vector<int> csrRowPtrA, vector<int> csrColIndexA, vector<double> csrValueA, vector<double> x, vector<double> &y_verified);
+inline int  GetMatrix(string filename, vector<int> &csrRowPtrA, vector<int> &csrColIndexA, vector<double> &csrValueA);
 inline void CompareVectors(vector<double> y1, vector<double> y2);
 inline void RunTests(string filename);
 int main(int argc, char* argv[])
@@ -150,7 +147,7 @@ inline void DetermineCoordinate(int diagonal, vector<int> csrRowPtrA, int sizeB,
   point.x = min(x_min, sizeA-1); //Double check it is valid index
   point.y = diagonal-x_min;
 }
-inline void MergePath(vector<int> csrRowPtrA, vector<int> csrColIndex, vector<double ALIGN_DOUBLE> csrValueA, vector<double ALIGN_DOUBLE> x, vector<double> &y, double* totalTime)
+inline void MergePath(vector<int> csrRowPtrA, vector<int> csrColIndex, vector<double> csrValueA, vector<double> x, vector<double> &y, double* totalTime)
 {
   /*
     Changes: 
@@ -202,12 +199,56 @@ inline void MergePath(vector<int> csrRowPtrA, vector<int> csrColIndex, vector<do
       for(; startCoord.x <= endCoord.x; ++startCoord.x, totalData = 0.0)
 	{   
 	  int maxYforLoop = min(csrRowPtrA.at(startCoord.x+1)-1, endCoord.y);
-	  //#pragma omp simd
+	  #pragma omp simd
 	  for(loopY = startCoord.y; loopY <= maxYforLoop; ++loopY)
 	    {
 	      //Diagonal[0], Merge[1], func[2], Matrix[3], SIMD_SET[4], SIMD_MUL[5], SIMD_ADD[6], SIMD_PERM[7]
+	      if(false && maxYforLoop-loopY >= 8)
+		{ //--FMADD && Reduced hadd --
+		  count++;
+		  //Get values (Will need to be cast to double)
+		  //Use setr (reverse) so that first value supplied is the first value in the mem/register
+		  TimeVar s1 = timeNow();
+		  __m256d values1 = _mm256_loadu_pd(&(csrValueA.at(loopY)));
+		  __m256d values2 = _mm256_loadu_pd(&(csrValueA.at(loopY+4)));
+		  //Get the x-values
+		  __m256d x1 = _mm256_setr_pd(x.at(csrColIndex.at(loopY)),x.at(csrColIndex.at(loopY+1)),x.at(csrColIndex.at(loopY+2)),x.at(csrColIndex.at(loopY+3)));
+		  __m256d x2 = _mm256_setr_pd(x.at(csrColIndex.at(loopY+4)),x.at(csrColIndex.at(loopY+5)),x.at(csrColIndex.at(loopY+6)),x.at(csrColIndex.at(loopY+7)));
+		  TimeVar s2 = timeNow(); set+=duration(s2-s1);
+		  //Multiply
+		  s1 = timeNow();
+		  values1 = _mm256_mul_pd(values1, x1);
+		  __m256d valuesSum = _mm256_fmadd_pd(values2, x2, values1);
+		  s2 = timeNow(); mul+=duration(s2-s1);
+		  //Sum all results
+		  
+		  //Instruction - Latency, Throughput (Skylake)
+		  //permute2x128 - 3, 1 (Latency, throughput)
+		  //extract - 3, 1
+		  //blend - 1, 1/3
+		  //permute4x64 - 3,1
+		  //FMADD - 4, 1/2
+		  //add - 4, 1/2
+		  //hadd - unknown
+		  //loadu_pd - 1, 1/4 - same for Aligned (but liekly benefits anyways)
+		  //storeu_pd - 1, 1/4 - same for aligned
+		  //mul - 4, 1/2
+		  //setr - unknown
+		  s1 = timeNow();
+		  values1 = _mm256_blend_pd(valuesSum, allZeros, 3); //Goes low->high so want imm8 to be 00000011 - where 1 says take from b (a zero) -Ignore highest 4 bits
+		  values2 = _mm256_permute2f128_pd(valuesSum, allZeros, 2); //0000 0010
+		  valuesSum = _mm256_add_pd(values1, values2);
+		  s2 = timeNow(); sum+=duration(s2-s1);
+		  
+		  //Access the final result
+		  _mm256_storeu_pd(results, valuesSum);
+		  //printf("Result 1: %.10e\t\tResult 2: %.10e\n", results[0], results[2]); //Check data is still accurate and valid (6/4/18 - Works)
+		  totalData+=(results[2]+results[0]);
+		  loopY+=7; //Other ++ is still in loop header
+		}
+	      
 	      if(maxYforLoop-loopY >= 8)
-		{
+		{ //--FMADD && Reduced hadd --
 		  count++;
 		  //Get values (Will need to be cast to double)
 		  //Use setr (reverse) so that first value supplied is the first value in the mem/register
@@ -222,24 +263,27 @@ inline void MergePath(vector<int> csrRowPtrA, vector<int> csrColIndex, vector<do
 		  TimeVar s2 = timeNow(); set+=duration(s2-s1);
 		  //Multiply
 		  s1 = timeNow();
+		  //Potentially find values1, and then use it in a FMA when finding values2
 		  values1 = _mm256_mul_pd(values1, x1);
-		  values2 = _mm256_mul_pd(values2, x2);
+		  __m256d valuesSum = _mm256_fmadd_pd(values2, x2, values1);
+		  //values2 = _mm256_mul_pd(values2, x2);
+		  //__m256d valuesSum = _mm256_hadd_pd(values1, values2);
 		  s2 = timeNow(); mul+=duration(s2-s1);
 		  //Sum all results
 
+		  //permute - 3, 1 (Latency, throughput)
+		  //extract - 3, 1
+		  //blend - 1, 1/3
 		  s1 = timeNow();
-		  __m256d valuesSum = _mm256_hadd_pd(values1, values2);
 		  values1 = _mm256_permute2f128_pd(valuesSum, allZeros, 19); //00010011b Get upper 128 of first param, and upper 128 of second param
 		  values2 = _mm256_permute2f128_pd(valuesSum, allZeros, 2); //00000010b Get lower 128 of first param, and lower 128 of second param
-		  valuesSum = _mm256_hadd_pd(values1, values2);
-		  
-		  //Final add
-		  values1 = _mm256_permute2f128_pd(valuesSum, allZeros, 19);
-		  valuesSum = _mm256_hadd_pd(values1, allZeros);
+
+		  valuesSum = _mm256_add_pd(values1, values2); //Makes end result be 2+0
 		  s2 = timeNow(); sum+=duration(s2-s1);
 		  //Access the final result
 		  _mm256_storeu_pd(results, valuesSum);
-		  totalData+=(results[2]+results[3]);
+		  //printf("Result 1: %.10e\t\tResult 2: %.10e\n", results[0], results[2]); //Check data is still accurate and valid (6/4/18 - Works)
+		  totalData+=(results[2]+results[0]);
 		  loopY+=7; //Other ++ is still in loop header
 		}
 	      else
@@ -249,7 +293,9 @@ inline void MergePath(vector<int> csrRowPtrA, vector<int> csrColIndex, vector<do
 	    }
 	  startCoord.y = loopY;
           #pragma omp critical(OutputUpdate)
-	  y.at(startCoord.x) = y.at(startCoord.x) +  totalData;
+	  {
+	    y.at(startCoord.x) = y.at(startCoord.x) +  totalData;
+	  }
 	}
       TimeVar mergeEnd = timeNow();
 #pragma omp critical(TimeOutput)
@@ -277,7 +323,9 @@ inline void RunTests(string filename)
   if (mm_is_complex(matcode)){ cout <<"Sorry, data type 'COMPLEX' is not supported. " << endl; return;}
   if ((ret_code = mm_read_mtx_crd_size(f, &rowsA, &columns, &nnzA)) !=0){ return;}
   fclose(f);
-
+  //cout << "Matcode: " << matcode << endl;
+  //cout << mm_typecode_to_str(matcode) << endl;
+  
   //File I/O
   ofstream outputFile;
   outputFile.open("output.csv", ios::out | ios::app);
@@ -288,11 +336,11 @@ inline void RunTests(string filename)
   vector<int> RowPtrA;
   vector<int> ColIndexA;
   double timeTotal[8] = {0.0}; //Diagonal[0], Merge[1], func[2], Matrix[3], SIMD_SET[4], SIMD_MUL[5], SIMD_ADD[6], SIMD_PERM[7] 
-  vector<double ALIGN_DOUBLE> x(columns, 1.0);
+  vector<double> x(columns, 1.0);
   vector<double> y(rowsA, 0.0);
   vector<double> y_verified(rowsA, 0.0);
   TESTS_FOR_SINGLE_FILE = max(5, 16000000/nnzA);
-  vector<double ALIGN_DOUBLE> ValueA;
+  vector<double> ValueA;
   //Start processing matrix - Base results and CSR only need to be found once.
   TimeVar matrixStart = timeNow();
   nnzA = GetMatrix(filename, RowPtrA, ColIndexA, ValueA);
@@ -302,7 +350,7 @@ inline void RunTests(string filename)
     {
       outputFile.close();
       return;
-    }
+    } 
   StandardSpMV(RowPtrA, ColIndexA, ValueA, x, y_verified);
   //Run the Mergebased Spmv function multiple times to find a more accurate average time value
   for(int i = 0; i < TESTS_FOR_SINGLE_FILE; i++)
@@ -311,15 +359,14 @@ inline void RunTests(string filename)
       TimeVar singleFuncStart = timeNow();
       MergePath(RowPtrA, ColIndexA, ValueA, x, y, timeTotal);
       TimeVar singleFuncEnd = timeNow();
-     
-      CompareVectors(y, y_verified);
       timeTotal[2]+=duration(singleFuncEnd-singleFuncStart);
     }
+  //CompareVectors(y, y_verified);
   //Change filename to only include file not path
   outputFile << filename.substr(filename.find_last_of("/\\")+1) << separator << nnzA << separator << timeTotal[0]/TESTS_FOR_SINGLE_FILE << separator << timeTotal[1]/TESTS_FOR_SINGLE_FILE << separator << timeTotal[2]/TESTS_FOR_SINGLE_FILE << separator << timeTotal[3]<< separator << TESTS_FOR_SINGLE_FILE << separator << timeTotal[4]/timeTotal[7] << separator << timeTotal[5]/timeTotal[7] << separator << timeTotal[6]/timeTotal[7] << separator << timeTotal[7] <<endl;
   outputFile.close();
 }
-inline int GetMatrix(string filename, vector<int> &csrRowPtrA, vector<int> &csrColIndexA, vector<double ALIGN_DOUBLE> &csrValueA)
+inline int GetMatrix(string filename, vector<int> &csrRowPtrA, vector<int> &csrColIndexA, vector<double> &csrValueA)
 {  
   int columnsA, nnzA_mtx, nnzA, rowsA;
   //Based on example by MM
@@ -382,12 +429,13 @@ inline int GetMatrix(string filename, vector<int> &csrRowPtrA, vector<int> &csrC
 	}
       else if(isInteger)
 	{
-	  temp_csrValueA.at(k) = (double)int_value;
+	  temp_csrValueA.at(k) = 1.0*int_value;
 	}
       else if(isBinary)
 	{
 	  temp_csrValueA.at(k) = 1.0;
 	}
+      //printf("Read in: %d %d %.10lf\n", i+1, j+1, temp_csrValueA.at(k)); //Checked 6-4-18, values read in correctly
     }
   fclose(f);
   
@@ -397,7 +445,10 @@ inline int GetMatrix(string filename, vector<int> &csrRowPtrA, vector<int> &csrC
       for (int i = 0; i < nnzA_mtx; i++)
 	{
 	  if (temp_csrRowIndexA.at(i) != temp_csrColIndexA.at(i))
-	    temp_csrRowPtrA.at(temp_csrColIndexA.at(i))++;
+	    {
+              #pragma omp critical(RowPtrUpdate)
+	      temp_csrRowPtrA.at(temp_csrColIndexA.at(i))++;
+	    }
 	}
     }
   // exclusive scan for temp_csrRowPtrA
@@ -422,7 +473,7 @@ inline int GetMatrix(string filename, vector<int> &csrRowPtrA, vector<int> &csrC
   //however it doesn't completely order it, columnIndexes/Value Indexes will not be in exact order
   //But it shouldn't matter everything is in correct row sections and the column index, and value index are still a valid pair
   csrColIndexA = vector<int>(nnzA);
-  csrValueA = vector<double ALIGN_DOUBLE>(nnzA);
+  csrValueA = vector<double>(nnzA);
   #pragma omp parallel for default(none) shared(csrColIndexA, csrValueA, temp_csrRowPtrA) firstprivate(temp_csrRowIndexA, temp_csrColIndexA, temp_csrValueA, isSymmetric, csrRowPtrA, nnzA_mtx)
   for (int i = 0; i < nnzA_mtx; i++)
     {
@@ -438,9 +489,23 @@ inline int GetMatrix(string filename, vector<int> &csrRowPtrA, vector<int> &csrC
 	  csrValueA.at(offset) = temp_csrValueA.at(i);
 	}
     }
+  /*
+  ofstream outputFile;
+  outputFile.open("SymmetricExpanded.csv", ios::out);
+  outputFile << "Row,Col,Value" << endl; //Header
+  --Check Values are still correct ---  As of 6/4/18 Correct
+  for(int i = 0; i < csrRowPtrA.size()-1; i++)
+    {
+      for(int j = csrRowPtrA.at(i); j < csrRowPtrA.at(i+1); j++)
+	{
+	  outputFile << i << "," << csrColIndexA.at(j) << "," << csrValueA.at(j) << endl;
+	}
+    }
+    outputFile.close();
+    */
   return nnzA;
 }
-inline void StandardSpMV(vector<int> csrRowPtrA, vector<int> csrColIndexA, vector<double ALIGN_DOUBLE> csrValueA, vector<double ALIGN_DOUBLE> x, vector<double> &y_verified)
+inline void StandardSpMV(vector<int> csrRowPtrA, vector<int> csrColIndexA, vector<double> csrValueA, vector<double> x, vector<double> &y_verified)
 {
   int sizeA = csrRowPtrA.size();
   double totalData = 0.0;
@@ -466,11 +531,9 @@ inline void CompareVectors(vector<double> y1, vector<double> y2)
 	  for(unsigned i = 0; i < y1.size(); i++)
 	    {
 	      //Comparing doubles directly will give incorrect answer due to rounding
-	      if(y1.at(i)/y2.at(i)>= 1.001 || y1.at(i)/y2.at(i) <= .999)
+	      if(abs(y1.at(i)-y2.at(i)) > .001)
 		{
-		  cout << "Failure." <<  endl;
-		  cout << "At line: " << i << " of size " << y1.size() << endl;
-		  cout << "\ty1: " << y1.at(i) << "\ty2: " << y2.at(i) << endl;
+		  cout << "Failure at line: " << i << "/" << y1.size() << " with y1: " << y1.at(i) << "\ty2: " << y2.at(i) << endl;
 		}
 	    }
 	}
