@@ -67,7 +67,7 @@ public:
   }
 };
 #define showFailure 1
-#define REQUIRES_MTX_EXTENSION 1
+#define REQUIRES_MTX_EXTENSION 0
 
 //Allows easy switch of using alignment or now
 //Credit to: https://stackoverflow.com/questions/22387586/measuring-execution-time-of-a-function-in-c
@@ -89,7 +89,6 @@ int main(int argc, char* argv[])
     Looks for a Command Line Arguement that is either a single .mtx file
     or a .txt that contains a list of .mtx files, with one per line and nothing else
    */
-  
   ofstream outputFile;
   outputFile.open("output.csv", ios::out);
   outputFile << "Matrix,Non-Zeros,Average time to find Coordinate along diagonal,Average Path Traversal and Matrix Multipication,Average total time for MergePath Function,Time to get Matrix,Tests Ran, Average time for getting data, Average Time for Arthimetic, Average time for geting final result, Count (SIMD Loops)" << endl; //Header
@@ -169,6 +168,18 @@ inline void MergePath(vector<int> csrRowPtrA, vector<int> csrColIndex, vector<do
     it should never be necessary on the startDiagonal but it is not impossible that it be needed so put just in case
     THe -1, will cancel out the +1 if they were easily divisible. The +1 will help fix the unbalanced load that would result on the final team/thread i the result of uneven division when finding IPT  
   */
+  //Instruction - Latency, Throughput (Skylake)
+  //permute2x128 - 3, 1 (Latency, throughput)
+  //extract - 3, 1
+  //blend - 1, 1/3
+  //permute4x64 - 3,1
+  //FMADD - 4, 1/2
+  //add - 4, 1/2
+  //hadd - unknown
+  //loadu_pd - 1, 1/4 - same for Aligned (but surely has other benefits anyways)
+  //storeu_pd - 1, 1/4 - same for aligned
+  //mul - 4, 1/2
+  //set - unknown
   int num_of_threads = omp_get_num_threads(); 
   #pragma omp parallel for num_threads(num_of_threads) schedule(static) default(none) firstprivate(num_of_threads, x, csrValueA, csrColIndex, csrRowPtrA) shared(y, totalTime)
   for(int i = 0; i < num_of_threads; i++)
@@ -196,9 +207,7 @@ inline void MergePath(vector<int> csrRowPtrA, vector<int> csrColIndex, vector<do
       TimeVar diagonalEnd = timeNow();
       TimeVar mergeStart = timeNow();
       int loopY;
-      double endResult;
       double totalData = 0.0;
-      double* x1_x2 = (double*)aligned_alloc(32, sizeof(double)*8);
       double* results = (double*)aligned_alloc(32, sizeof(double)*4);
       __m256d allZeros = _mm256_setzero_pd();
       for(; startCoord.x <= endCoord.x; ++startCoord.x, totalData = 0.0)
@@ -207,29 +216,14 @@ inline void MergePath(vector<int> csrRowPtrA, vector<int> csrColIndex, vector<do
 	  //#pragma omp simd
 	  for(loopY = startCoord.y; loopY <= maxYforLoop; ++loopY)
 	    {
-	      if(!false && maxYforLoop-loopY >= 8 && loopY%4==0) //With the Alignment 4 Doubles fit in the 32bit required Alignment - So the address we load from must be the first of the 4 set, and thus need to check for that with %4==0
+	      if(maxYforLoop-loopY >= 8 && loopY%4==0) //With the Alignment 4 Doubles fit in the 32bit required Alignment - So can only call on the first of the set of four
 		{
-		  //Instruction - Latency, Throughput (Skylake)
-		  //permute2x128 - 3, 1 (Latency, throughput)
-		  //extract - 3, 1
-		  //blend - 1, 1/3
-		  //permute4x64 - 3,1
-		  //FMADD - 4, 1/2
-		  //add - 4, 1/2
-		  //hadd - unknown
-		  //loadu_pd - 1, 1/4 - same for Aligned (but surely has other benefits anyways)
-		  //storeu_pd - 1, 1/4 - same for aligned
-		  //mul - 4, 1/2
-		  //set - unknown
 		  count++;
 		  TimeVar s1 = timeNow();
-		  //Try loading in the x values into an aligned array first over using the set instruction
-		  x1_x2[0] = x.at(csrColIndex.at(loopY)); x1_x2[1] = x.at(csrColIndex.at(loopY+1)); x1_x2[2] = x.at(csrColIndex.at(loopY+2)); x1_x2[3] = x.at(csrColIndex.at(loopY+3));
-		  x1_x2[4] = x.at(csrColIndex.at(loopY+4)); x1_x2[5] = x.at(csrColIndex.at(loopY+5)); x1_x2[6] = x.at(csrColIndex.at(loopY+6)); x1_x2[7] = x.at(csrColIndex.at(loopY+7));
 		  __m256d values1 = _mm256_load_pd(&(csrValueA.at(loopY)));
 		  __m256d values2 = _mm256_load_pd(&(csrValueA.at(loopY+4)));
-		  __m256d x1 = _mm256_load_pd(&(x1_x2[0]));
-		  __m256d x2 = _mm256_load_pd(&(x1_x2[4]));
+		  __m256d x1 = _mm256_set_pd(x.at(csrColIndex.at(loopY+3)),x.at(csrColIndex.at(loopY+2)),x.at(csrColIndex.at(loopY+1)),x.at(csrColIndex.at(loopY)));
+		  __m256d x2 = _mm256_set_pd(x.at(csrColIndex.at(loopY+7)),x.at(csrColIndex.at(loopY+6)),x.at(csrColIndex.at(loopY+5)),x.at(csrColIndex.at(loopY+4)));
 		  TimeVar s2 = timeNow(); getData+=duration(s2-s1);
 
 		  //Do multiplication/Addition
@@ -243,20 +237,12 @@ inline void MergePath(vector<int> csrRowPtrA, vector<int> csrColIndex, vector<do
 
 		  //Access the final result
 		  s1 = timeNow();
-		  _mm256_store_pd(results, valuesSum);
-		  totalData+=(results[2]+results[0]);
+		  _mm256_store_pd(results, valuesSum); 
+		  totalData+=(results[2]+results[3]);
 		  loopY+=7;
 		  s2 = timeNow(); getResult+=duration(s2-s1);
 		}
-	      if(false)
-		{/* OpenMP Optimization w/ SIMD but doesn't really use SIMD... does use SSE2*/
-		  __m128d value = _mm_load_sd(&csrValueA.at(loopY));
-		  __m128d x_value = _mm_load_sd(&x.at(csrColIndex.at(loopY)));
-		  value = _mm_mul_sd(value, x_value);
-		  _mm_store_sd(&endResult, value);
-		  totalData += endResult;
-		}
-	      if(false)
+	      else if(false)
 		{ /* Try an get what Base Compiler did here -- Used AVX but did an incredibly basic form (Not even really utilizing SIMD) */
 		  TimeVar s1 = timeNow();
 		  totalData += singleMM(csrValueA.at(loopY), x.at(csrColIndex.at(loopY)));
@@ -285,6 +271,7 @@ inline void MergePath(vector<int> csrRowPtrA, vector<int> csrColIndex, vector<do
 	totalTime[6]+= getResult;
 	totalTime[7] = count*1.0;
       }
+      free(results);
     }
 }
 inline void RunTests(string filename)
@@ -311,20 +298,19 @@ inline void RunTests(string filename)
   vector<double, AlignmentAllocator<double, 32>> x(columns, 1.0);
   vector<double> y(rowsA, 0.0);
   vector<double> y_verified(rowsA, 0.0);
-  TESTS_FOR_SINGLE_FILE = max(5, 16000000/nnzA); //May want to lower value
+  TESTS_FOR_SINGLE_FILE = min(10, max(5, 16000000/nnzA)); //May want to lower value
   vector<double, AlignmentAllocator<double, 32>> ValueA;
  
   TimeVar matrixStart = timeNow();
   nnzA = GetMatrix(filename, RowPtrA, ColIndexA, ValueA);
   TimeVar matrixEnd = timeNow();
   timeTotal[3]+= duration(matrixEnd-matrixStart);
-  if(columns < 0) //Returned a negative which is an error
+  if(columns < 0) //negative ==  error
     {
       outputFile.close();
       return;
     } 
   StandardSpMV(RowPtrA, ColIndexA, ValueA, x, y_verified);
-  //Run the Mergebased Spmv function multiple times to find a more accurate average time value
   for(int i = 0; i < TESTS_FOR_SINGLE_FILE; i++)
     {
       fill(y.begin(), y.end(), 0.0);     
@@ -334,8 +320,9 @@ inline void RunTests(string filename)
       timeTotal[2]+=duration(singleFuncEnd-singleFuncStart);
     }
   //CompareVectors(y, y_verified);
-  //Change filename to only include file not path
-  outputFile << filename.substr(filename.find_last_of("/\\")+1) << separator << nnzA << separator << timeTotal[0]/TESTS_FOR_SINGLE_FILE << separator << timeTotal[1]/TESTS_FOR_SINGLE_FILE << separator << timeTotal[2]/TESTS_FOR_SINGLE_FILE << separator << timeTotal[3]<< separator << TESTS_FOR_SINGLE_FILE << separator << timeTotal[4]/timeTotal[7] << separator << timeTotal[5]/timeTotal[7] << separator << timeTotal[6]/timeTotal[7] << separator << timeTotal[7] <<endl;
+  outputFile << filename.substr(filename.find_last_of("/\\")+1) << separator << nnzA << separator << timeTotal[0]/TESTS_FOR_SINGLE_FILE << separator << timeTotal[1]/TESTS_FOR_SINGLE_FILE;
+  outputFile << separator << timeTotal[2]/TESTS_FOR_SINGLE_FILE << separator << timeTotal[3]<< separator << TESTS_FOR_SINGLE_FILE << separator << timeTotal[4]/timeTotal[7] << separator;
+  outputFile << timeTotal[5]/timeTotal[7] << separator << timeTotal[6]/timeTotal[7] << separator << timeTotal[7] <<endl;
   outputFile.close();
 }
 inline int GetMatrix(string filename, vector<int> &csrRowPtrA, vector<int> &csrColIndexA, vector<double, AlignmentAllocator<double, 32>> &csrValueA)
@@ -438,7 +425,7 @@ inline int GetMatrix(string filename, vector<int> &csrRowPtrA, vector<int> &csrC
   //But it shouldn't matter everything is in correct row sections and the column index, and value index are still a valid pair
   csrColIndexA = vector<int>(nnzA);
   csrValueA = vector<double, AlignmentAllocator<double, 32>>(nnzA);
-  #pragma omp parallel for default(none) shared(csrColIndexA, csrValueA, temp_csrRowPtrA) firstprivate(temp_csrRowIndexA, temp_csrColIndexA, temp_csrValueA, isSymmetric, csrRowPtrA, nnzA_mtx)
+  //#pragma omp parallel for default(none) shared(csrColIndexA, csrValueA, temp_csrRowPtrA) firstprivate(temp_csrRowIndexA, temp_csrColIndexA, temp_csrValueA, isSymmetric, csrRowPtrA, nnzA_mtx)
   for (int i = 0; i < nnzA_mtx; i++)
     {
       int tempRowIndexAti = temp_csrRowIndexA.at(i);
